@@ -361,7 +361,9 @@
       case 'march': {
         // Black ones: straight line, steady pace, through the ring and out the far side
         h.x += h.dir * h.speed * dt;
-        if (rock.invuln <= 0 && rock.bounceSafe <= 0 && Math.abs(rock.x - h.x) < 36 && rock.y > FLOOR - 45) {
+        // No damage while coming down on them in HYPE MODE — the landing slam smashes them instead
+        const smashing = hypeMode > 0 && !rock.grounded;
+        if (!smashing && rock.invuln <= 0 && rock.bounceSafe <= 0 && Math.abs(rock.x - h.x) < 36 && rock.y > FLOOR - 45) {
           hurtPlayer(h);
           break;
         }

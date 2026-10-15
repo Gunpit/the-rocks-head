@@ -37,6 +37,8 @@
     blackFirstMilestone: 2000,
     blackMilestoneGrowth: 1.5,
     blackSpeedStep: 0.15,    // speed added per milestone
+    blackGapBase: 2.5,       // minimum seconds between black spawns...
+    blackGapStep: 0.5,       // ...plus this much per milestone (faster but fewer)
     blackMaxLevel: 10,       // stops ramping here (2.5x speed)
     rockHeight: 110,
   };
@@ -211,7 +213,7 @@
     RocksMusic.start();
     rock = newRock(); humans = []; particles = []; texts = []; splats = [];
     score = 0; lives = T.lives; hype = 0; hypeMode = 0; speedLevel = 0;
-    elapsed = 0; spawnTimer = 0.6; shake = 0; hitstop = 0;
+    elapsed = 0; spawnTimer = 0.6; shake = 0; hitstop = 0; lastBlackAt = -99;
     ignoreHold = true;
     addText(W / 2, 250, 'RING THE BELL!', '#ffd23f', 56, 1.4);
     sfx.cheer(1);
@@ -230,7 +232,10 @@
 
   // Difficulty ramps with time survived
   const spawnInterval = () => Math.max(0.5, 1.7 - elapsed * 0.012) * rand(0.7, 1.3);
-  const blackChance = () => Math.min(0.75, 0.12 + elapsed * 0.004 + speedLevel * 0.04);
+  const blackChance = () => Math.min(0.4, 0.12 + elapsed * 0.004);
+  // As they get faster they come less often: minimum seconds between black spawns
+  const blackGap = () => T.blackGapBase + speedLevel * T.blackGapStep;
+  let lastBlackAt = -99;
   const blackSpeed = () => 1 + speedLevel * T.blackSpeedStep;
 
   // How many milestones a score has passed
@@ -254,7 +259,7 @@
     addText(W / 2, 200, lvl >= T.blackMaxLevel ? 'MAXIMUM CARNAGE!' : "THEY'RE GETTING FASTER!", '#ff3b3b', 40, 1.4);
   }
   const maxHumans = () => Math.min(16, 6 + elapsed / 10);
-  const maxBlacks = () => Math.min(6, 1 + Math.floor(elapsed / 20) + Math.floor(speedLevel / 2));   // on screen at once
+  const maxBlacks = () => Math.min(3, 1 + Math.floor(elapsed / 20));   // on screen at once
 
   // ---------------------------------------------------------------------------
   // Humans
@@ -262,7 +267,9 @@
   function spawnHuman(forceBlack = false) {
     const fromLeft = Math.random() < 0.5;
     const blacksIn = humans.filter((h) => h.type === 'black' && !h.dead).length;
-    const black = forceBlack || (blacksIn < maxBlacks() && Math.random() < blackChance());
+    const black = forceBlack ||
+      (blacksIn < maxBlacks() && elapsed - lastBlackAt >= blackGap() && Math.random() < blackChance());
+    if (black) lastBlackAt = elapsed;
     humans.push({
       type: black ? 'black' : 'yellow',
       x: fromLeft ? -20 : W + 20, y: FLOOR, vx: 0, vy: 0,
@@ -271,7 +278,8 @@
       state: black ? 'march' : 'enter',
       speed: black ? rand(95, 130) * blackSpeed() : rand(45, 75),
       t: Math.random() * 10, think: rand(0.5, 2),
-      rot: 0, rv: 0, flatT: 0, scared: false, ringOutDone: false, dead: false,
+      rot: 0, rv: 0, flatT: 0, ringOutDone: false, dead: false,
+      coward: !black && Math.random() < 1 / 7, scared: false,   // a few yellow fans still run
       passed: false, hitPlayer: false,
     });
   }
@@ -363,15 +371,21 @@
       }
       case 'walk': {
         const dx = rock.x - h.x;
+        // Yellow fans wander the ring. Cowards (about 1 in 7) run when the rock jumps or charges nearby.
         let speed = h.speed;
         h.think -= dt;
-        h.scared = (!rock.grounded && Math.abs(dx) < 220) || (rock.charging && Math.abs(dx) < 150);
+        h.scared = h.coward && ((!rock.grounded && Math.abs(dx) < 220) || (rock.charging && Math.abs(dx) < 150));
         if (h.scared) {
           h.dir = -(Math.sign(dx) || 1);
           speed *= 1.9;
-        } else if (h.think <= 0) {
-          h.think = rand(0.7, 2);
-          h.dir = Math.random() < 0.55 ? (Math.sign(dx) || 1) : pick([-1, 1]);
+        } else {
+          if (h.think <= 0) {
+            h.think = rand(0.7, 2);
+            h.dir = Math.random() < 0.4 ? (Math.sign(dx) || 1) : pick([-1, 1]);
+          }
+          // Drift back toward the middle instead of hugging the ropes
+          if (h.x < HUM_MIN_X + 80) h.dir = 1;
+          else if (h.x > HUM_MAX_X - 80) h.dir = -1;
         }
         h.x += h.dir * speed * dt;
         if (h.x < HUM_MIN_X) { h.x = HUM_MIN_X; h.dir = 1; }
@@ -1010,7 +1024,7 @@
     }
     ctx.restore();
 
-    if (h.scared && yellow && h.state === 'walk') {
+    if (h.scared && h.state === 'walk') {
       ctx.fillStyle = '#ffffff';
       ctx.font = `20px ${FONT}`;
       ctx.textAlign = 'center';

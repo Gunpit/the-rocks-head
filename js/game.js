@@ -392,18 +392,29 @@
     humans.push(h);
   }
 
-  // Yellow fans leap out of the front row of the crowd and drop onto an open spot on the mat
+  // Yellow fans come out of the crowd: they stand up behind the barricade, climb onto the
+  // rail, wave for a beat, then leap over the ropes and drop onto an open spot on the mat.
+  const BARRICADE_Y = 230;                 // top rail of the crowd barricade
+  const CLIMB_RISE = 0.35, CLIMB_TIME = 0.6;
   function leapFromCrowd(h) {
     let tx = rand(HUM_MIN_X + 30, HUM_MAX_X - 30);
     for (let k = 0; k < 8 && Math.abs(tx - rock.x) < 90; k++) tx = rand(HUM_MIN_X + 30, HUM_MAX_X - 30);
-    const sx = clamp(tx + rand(-70, 70), 80, W - 80), sy = 225;   // front row of the stands
+    h.state = 'climb';
+    h.climbT = 0;
+    h.x = clamp(tx + rand(-70, 70), 90, W - 90);
+    h.y = BARRICADE_Y + 75;                // hidden behind the barricade
+    h.landX = tx;
+    h.dir = Math.sign(tx - h.x) || 1;
+  }
+
+  function launchFromRail(h) {
+    const sy = BARRICADE_Y;
     const g = T.gravity * 0.8, vy0 = -rand(320, 420);
     const t = (-vy0 + Math.sqrt(vy0 * vy0 + 2 * g * (FLOOR - sy))) / g;   // time to land on the mat
     h.state = 'air';
-    h.x = sx; h.y = sy;
-    h.vx = (tx - sx) / t; h.vy = vy0;
+    h.y = sy;
+    h.vx = (h.landX - h.x) / t; h.vy = vy0;
     h.rot = 0; h.rv = rand(-1.5, 1.5);       // a little flail, mostly upright
-    h.dir = Math.sign(tx - sx) || 1;
     h.dropping = true;
   }
 
@@ -523,6 +534,13 @@
         if (h.x > HUM_MAX_X) { h.x = HUM_MAX_X; h.dir = -1; }
         break;
       }
+      case 'climb': {
+        h.climbT += dt;
+        const p = Math.min(1, h.climbT / CLIMB_RISE);
+        h.y = BARRICADE_Y + 75 * Math.pow(1 - p, 2);      // rise up onto the rail, easing in
+        if (h.climbT >= CLIMB_TIME) launchFromRail(h);
+        break;
+      }
       case 'air': {
         h.vy += T.gravity * 0.8 * dt;
         h.x += h.vx * dt; h.y += h.vy * dt; h.rot += h.rv * dt;
@@ -613,7 +631,7 @@
     const radius = mega ? T.slamRadiusMax * 1.25 : lerp(T.slamRadiusMin, T.slamRadiusMax, power);
     let squashed = 0, base = 0, bounceDir = 0;
     for (const h of humans) {
-      if (h.state === 'flat' || h.state === 'air' || h.dead) continue;
+      if (h.state === 'flat' || h.state === 'air' || h.state === 'climb' || h.dead) continue;
       const dx = h.x - rock.x, d = Math.abs(dx);
       if (h.type === 'black') {
         // Black ones only go down to a HYPE MODE slam; otherwise they shrug it off
@@ -1080,7 +1098,7 @@
   function drawHuman(h) {
     const yellow = h.type === 'yellow';
     const col = yellow ? '#f5c518' : '#111';
-    const y = h.state === 'air' ? h.y : h.y + dipAt(h.x);
+    const y = h.state === 'air' || h.state === 'climb' ? h.y : h.y + dipAt(h.x);
     ctx.save();
     ctx.translate(h.x, y);
     ctx.lineCap = 'round';
@@ -1131,7 +1149,10 @@
       }
     }
 
-    const pace = h.state === 'air' ? 0 : Math.sin(h.t * 12 * (h.speed / 60) * (h.scared ? 1.8 : 1));
+    // Waving on the rail and flailing on the way down; otherwise a walk cycle
+    const flail = h.state === 'climb' || (h.state === 'air' && h.dropping);
+    const pace = flail ? Math.sin(time * 16 + h.t * 3)
+      : h.state === 'air' ? 0 : Math.sin(h.t * 12 * (h.speed / 60) * (h.scared ? 1.8 : 1));
     ctx.strokeStyle = col;
     ctx.lineWidth = 4;
     ctx.beginPath();
@@ -1141,9 +1162,10 @@
     // body
     ctx.moveTo(0, -22); ctx.lineTo(0, -42);
     // arms
-    if (h.state === 'air' || h.scared) {
-      ctx.moveTo(0, -38); ctx.lineTo(-11, -56 + pace * 3);
-      ctx.moveTo(0, -38); ctx.lineTo(11, -56 - pace * 3);
+    if (h.state === 'air' || h.state === 'climb' || h.scared) {
+      const wave = flail ? 7 : 3;
+      ctx.moveTo(0, -38); ctx.lineTo(-11, -56 + pace * wave);
+      ctx.moveTo(0, -38); ctx.lineTo(11, -56 - pace * wave);
     } else if (!yellow) {
       ctx.moveTo(0, -38); ctx.lineTo(h.dir * 18, -40 + pace * 2);
       ctx.moveTo(0, -38); ctx.lineTo(h.dir * 16, -34 - pace * 2);
@@ -1230,6 +1252,45 @@
         ctx.strokeText('MEGA!', mx + 18, my + 14);
         ctx.fillText('MEGA!', mx + 18, my + 14);
       }
+    }
+  }
+
+  // Fans climbing out of the crowd: only the part above the barricade rail shows
+  function drawClimbers() {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(-40, -40, W + 80, BARRICADE_Y + 41);
+    ctx.clip();
+    for (const h of humans) if (h.state === 'climb') drawHuman(h);
+    ctx.restore();
+  }
+
+  // Padded crowd barricade along the front of the stands
+  function drawBarricade() {
+    const top = BARRICADE_Y, x0 = 56, x1 = 904;
+    ctx.fillStyle = '#20263f';
+    ctx.fillRect(x0, top, x1 - x0, 16);
+    ctx.fillStyle = '#2c3456';
+    for (let x = x0 + 10; x < x1 - 10; x += 44) ctx.fillRect(x, top + 3, 36, 10);   // padded panels
+    ctx.strokeStyle = '#aeb6c8';                                                       // steel top rail
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x0, top); ctx.lineTo(x1, top);
+    ctx.stroke();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x0, top, x1 - x0, 16);
+  }
+
+  // Shadow on the mat under a falling fan, growing as they get closer to landing
+  function drawDropShadows() {
+    for (const h of humans) {
+      if (h.state !== 'air' || !h.dropping) continue;
+      const p = clamp((h.y - BARRICADE_Y) / (FLOOR - BARRICADE_Y), 0, 1);
+      ctx.fillStyle = `rgba(0, 0, 0, ${0.1 + 0.25 * p})`;
+      ctx.beginPath();
+      ctx.ellipse(h.landX, FLOOR + 2, 6 + 14 * p, 2 + 3 * p, 0, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
@@ -1414,10 +1475,13 @@
     if (shake > 0) ctx.translate(rand(-1, 1) * shake, rand(-1, 1) * shake);
     drawArena();
     drawCrowd();
+    drawClimbers();
+    drawBarricade();
     drawRingBack();
     drawSplats();
+    drawDropShadows();
     for (const h of humans) if (h.state === 'flat') drawHuman(h);
-    for (const h of humans) if (h.state !== 'flat' && h.state !== 'air') drawHuman(h);
+    for (const h of humans) if (h.state !== 'flat' && h.state !== 'air' && h.state !== 'climb') drawHuman(h);
     if (state === 'play' || state === 'over') drawRock();
     for (const h of humans) if (h.state === 'air') drawHuman(h);
     drawRingFront();

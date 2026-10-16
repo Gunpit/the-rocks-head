@@ -37,6 +37,7 @@
     blackFirstMilestone: 2000,
     blackMilestoneGrowth: 1.5,
     blackSpeedStep: 0.15,    // speed added per milestone
+    blackWarning: 1.1,       // seconds of edge warning before a black one enters (divided by its speed-up)
     blackGapBase: 2.5,       // minimum seconds between black spawns...
     blackGapStep: 0.5,       // ...plus this much per milestone (faster but fewer)
     blackMaxLevel: 10,       // stops ramping here (2.5x speed)
@@ -132,10 +133,103 @@
       master.gain.value = muted ? 0 : 1;
       master.connect(actx.destination);
       RocksMusic.init(actx, master);
+      Object.keys(VOICE_FILES).forEach(loadVoice);
     }
     if (actx.state === 'suspended') actx.resume();
     return actx;
   }
+  // "The Rock's Head!" voice clips. Downloaded right away; decoded once audio is unlocked.
+  const VOICE_FILES = { start: 'rockshead1.wav', over: 'rockshead2.wav', hypeEnd: 'rockshead3.wav' };
+  const voiceData = {}, voices = {};
+  for (const [name, file] of Object.entries(VOICE_FILES)) {
+    voiceData[name] = fetch(file).then((r) => (r.ok ? r.arrayBuffer() : null)).catch(() => null);
+  }
+  function loadVoice(name) {
+    if (!voices[name]) {
+      voices[name] = voiceData[name]
+        .then((data) => data && actx.decodeAudioData(data))
+        .then((buffer) => {
+          if (!buffer) return null;
+          // Skip the leading silence and bring every clip to the same loudness
+          const d = buffer.getChannelData(0);
+          let peak = 0, first = 0;
+          for (let i = 0; i < d.length; i++) peak = Math.max(peak, Math.abs(d[i]));
+          while (first < d.length && Math.abs(d[first]) < peak * 0.08) first++;
+          return { buffer, offset: Math.max(0, first / buffer.sampleRate - 0.03), gain: peak ? 0.9 / peak : 1 };
+        })
+        .catch(() => null);
+    }
+    return voices[name];
+  }
+  // Which clips get the stadium-announcer treatment (game over stays dry)
+  const VOICE_FX = { start: true, hypeEnd: true, over: false };
+  const ANNOUNCER_TAIL = 1.4;            // seconds of reverb/echo after the voice ends
+  // Random playback-rate range per clip, so repeats stay interesting (0.75-1.3 is about -5 to +4.5 semitones)
+  const VOICE_PITCH = { hypeEnd: [0.75, 1.3] };
+
+  // Announcer chain: PA-style EQ + compression, then dry + slapback echo + arena reverb
+  let announcerIn = null;
+  function announcerBus() {
+    if (announcerIn) return announcerIn;
+    const a = actx;
+    announcerIn = a.createGain();
+    const hp = a.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 160;
+    const presence = a.createBiquadFilter();
+    presence.type = 'peaking'; presence.frequency.value = 2800; presence.Q.value = 0.9; presence.gain.value = 5;
+    const comp = a.createDynamicsCompressor();
+    comp.threshold.value = -20; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.15;
+    announcerIn.connect(hp).connect(presence).connect(comp);
+
+    const out = a.createGain();
+    out.gain.value = 0.72;
+    out.connect(master);
+    comp.connect(out);                                   // dry
+
+    // Slapback echo bouncing off the far side of the arena
+    const delay = a.createDelay(1);
+    delay.delayTime.value = 0.21;
+    const fb = a.createGain();
+    fb.gain.value = 0.32;
+    const dlp = a.createBiquadFilter();
+    dlp.type = 'lowpass'; dlp.frequency.value = 2600;
+    const echo = a.createGain();
+    echo.gain.value = 0.38;
+    comp.connect(delay).connect(dlp).connect(fb).connect(delay);
+    dlp.connect(echo).connect(out);
+
+    // Big-room reverb
+    const len = Math.floor(a.sampleRate * 2.6);
+    const ir = a.createBuffer(2, len, a.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5);
+    }
+    const verb = a.createConvolver();
+    verb.buffer = ir;
+    const wet = a.createGain();
+    wet.gain.value = 0.45;
+    comp.connect(verb).connect(wet).connect(out);
+    return announcerIn;
+  }
+
+  function playVoice(name) {
+    const a = audio();
+    if (!a) return;
+    loadVoice(name).then((v) => {
+      if (!v) return;
+      const src = a.createBufferSource(), g = a.createGain();
+      src.buffer = v.buffer;
+      const range = VOICE_PITCH[name];
+      const rate = range ? rand(range[0], range[1]) : 1;
+      src.playbackRate.value = rate;
+      g.gain.value = v.gain;
+      src.connect(g).connect(VOICE_FX[name] ? announcerBus() : master);
+      src.start(0, v.offset);
+      RocksMusic.duck((v.buffer.duration - v.offset) / rate + (VOICE_FX[name] ? ANNOUNCER_TAIL * 0.5 : 0));
+    });
+  }
+
   function toggleMute() {
     muted = !muted;
     if (master) master.gain.setTargetAtTime(muted ? 0 : 1, actx.currentTime, 0.02);
@@ -176,7 +270,6 @@
     dodge: () => { tone(900, 300, 0.18, 'triangle', 0.12); noise(0.15, 0.08, 3000); },
     cheer: (v) => noise(0.6 + v * 0.6, 0.06 + 0.08 * v, 2600),
     shutter: () => { tone(2600, 1800, 0.02, 'square', 0.025); tone(1800, 1400, 0.03, 'square', 0.02, 0.05); },
-    over: () => [330, 262, 196, 131].forEach((f, i) => tone(f, f * 0.98, 0.3, 'triangle', 0.18, i * 0.2)),
   };
 
   // ---------------------------------------------------------------------------
@@ -211,6 +304,7 @@
     setPaused(false);
     RocksMusic.stop();
     RocksMusic.start();
+    playVoice('start');
     rock = newRock(); humans = []; particles = []; texts = []; splats = [];
     score = 0; lives = T.lives; hype = 0; hypeMode = 0; speedLevel = 0;
     elapsed = 0; spawnTimer = 0.6; shake = 0; hitstop = 0; lastBlackAt = -99;
@@ -227,7 +321,7 @@
       best = score;
       try { localStorage.setItem('rockshead-best', String(best)); } catch (e) { /* storage blocked */ }
     }
-    sfx.over();
+    playVoice('over');
   }
 
   // Difficulty ramps with time survived
@@ -281,6 +375,8 @@
       rot: 0, rv: 0, flatT: 0, ringOutDone: false, dead: false,
       coward: !black && Math.random() < 1 / 7, scared: false,   // a few yellow fans still run
       passed: false, hitPlayer: false,
+      // Black ones wait off-screen behind a warning arrow first (shorter as they get faster)
+      warn: black ? Math.max(0.5, T.blackWarning / blackSpeed()) : 0,
     });
   }
 
@@ -359,6 +455,7 @@
         break;
       }
       case 'march': {
+        if (h.warn > 0) { h.warn -= dt; break; }
         // Black ones: straight line, steady pace, through the ring and out the far side
         h.x += h.dir * h.speed * dt;
         // No damage while coming down on them in HYPE MODE — the landing slam smashes them instead
@@ -685,7 +782,7 @@
           life: 3, max: 3, size: rand(4, 7), color: pick(['#e8202a', '#ffffff', '#1aa3e8', '#ffd23f']), grav: 60,
         });
       }
-      if (hypeMode <= 0) { hypeMode = 0; hype = 0; RocksMusic.setHype(false); }
+      if (hypeMode <= 0) { hypeMode = 0; hype = 0; RocksMusic.setHype(false); playVoice('hypeEnd'); }
     } else {
       hype = Math.max(0, hype - T.hypeDecay * dt);
     }
@@ -982,7 +1079,15 @@
       ctx.rotate(h.rot);
       ctx.translate(0, 32);
     }
-    if (!yellow) ctx.scale(1.08, 1.08);
+    if (!yellow) {
+      ctx.scale(1.08, 1.08);
+      // Red glow so they read against the dark arena outside the ring; fades out as they step in
+      const outside = clamp(Math.max(HUM_MIN_X - h.x, h.x - HUM_MAX_X) / 40, 0, 1);
+      if (outside > 0) {
+        ctx.shadowColor = `rgba(255, 40, 40, ${0.95 * outside})`;
+        ctx.shadowBlur = 10;
+      }
+    }
 
     const pace = h.state === 'air' ? 0 : Math.sin(h.t * 12 * (h.speed / 60) * (h.scared ? 1.8 : 1));
     ctx.strokeStyle = col;
@@ -1083,6 +1188,29 @@
         ctx.strokeText('MEGA!', mx + 18, my + 14);
         ctx.fillText('MEGA!', mx + 18, my + 14);
       }
+    }
+  }
+
+  // Flashing arrows at the screen edge while a black one waits to come in
+  function drawWarnings() {
+    for (const h of humans) {
+      if (h.type !== 'black' || h.state !== 'march' || h.warn <= 0) continue;
+      if (Math.floor(time * 10) % 2) continue;      // flash
+      const x = h.dir > 0 ? 34 : W - 34, y = FLOOR - 45;
+      const pulse = 1 + 0.15 * Math.sin(time * 20);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(h.dir * pulse, pulse);              // arrow points into the ring
+      ctx.beginPath();
+      ctx.moveTo(-14, -26); ctx.lineTo(18, 0); ctx.lineTo(-14, 26); ctx.lineTo(-6, 0);
+      ctx.closePath();
+      ctx.fillStyle = '#ff2a2a';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 3;
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      outlinedText('!', x, y - 44, 34, '#ff2a2a', 'center', 5);
     }
   }
 
@@ -1252,6 +1380,7 @@
     for (const h of humans) if (h.state === 'air') drawHuman(h);
     drawRingFront();
     drawParticles();
+    drawWarnings();
     drawTexts();
     ctx.restore();
 

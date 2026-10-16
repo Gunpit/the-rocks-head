@@ -18,7 +18,7 @@ window.RocksMusic = (() => {
   };
 
   let actx = null, buffer = null, loading = null;
-  let input, lowShelf, highShelf, lowpass, gritGain, musicGain, crowdGain, sfxBus, noiseBuf;
+  let input, lowShelf, highShelf, lowpass, gritGain, musicGain, duckGain, crowdGain, sfxBus, noiseBuf;
   let source = null;
   let playing = false, paused = false, hype = false;
   let offset = 0, startedAt = 0;          // playhead bookkeeping for pause/resume
@@ -65,7 +65,9 @@ window.RocksMusic = (() => {
     gritGain = actx.createGain();
     gritGain.gain.value = 0;
     lowpass.connect(shaper).connect(gritGain).connect(musicGain);
-    musicGain.connect(comp);
+    // Ducks under voice clips
+    duckGain = actx.createGain();
+    musicGain.connect(duckGain).connect(comp);
 
     sfxBus = actx.createGain();
     sfxBus.connect(comp);
@@ -237,5 +239,16 @@ window.RocksMusic = (() => {
     applyMix(on ? 0.08 : 1.2);
   }
 
-  return { init, start, stop, setPaused, setHype };
+  // Dip the music for a few seconds so a voice clip can be heard over it
+  function duck(seconds, depth = 0.3) {
+    if (!actx) return;
+    const t = actx.currentTime, g = duckGain.gain;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(g.value, t);
+    g.linearRampToValueAtTime(depth, t + 0.08);
+    g.setValueAtTime(depth, t + seconds);
+    g.linearRampToValueAtTime(1, t + seconds + 0.4);
+  }
+
+  return { init, start, stop, setPaused, setHype, duck };
 })();

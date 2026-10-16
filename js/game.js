@@ -24,8 +24,8 @@
     jumpMax: 1260,           // jump speed at full charge (peaks just below the top of the screen)
     airSpeed: 330,           // sideways jump speed when the mouse is far to one side
     megaCharge: 0.95,        // charge needed for a MEGA SLAM
-    slamRadiusMin: 55,
-    slamRadiusMax: 150,
+    slamRadiusMin: 48,
+    slamRadiusMax: 125,
     matBounce: 0.32,         // how much the mat bounces the rock back up
     invuln: 1.5,
     lives: 3,
@@ -299,6 +299,15 @@
   }
   rock = newRock(); humans = []; particles = []; texts = [];
 
+  // Debug-only peek at live state, for automated playtests (index.html?debug)
+  if (DEBUG) {
+    window.__rocksDebug = {
+      get state() { return state; }, get rock() { return rock; }, get humans() { return humans; },
+      get score() { return score; }, get elapsed() { return elapsed; }, get lives() { return lives; },
+      tick: (dt) => update(dt),            // step the simulation by hand (works even when the tab is hidden)
+    };
+  }
+
   function startGame() {
     state = 'play';
     setPaused(false);
@@ -364,7 +373,7 @@
     const black = forceBlack ||
       (blacksIn < maxBlacks() && elapsed - lastBlackAt >= blackGap() && Math.random() < blackChance());
     if (black) lastBlackAt = elapsed;
-    humans.push({
+    const h = {
       type: black ? 'black' : 'yellow',
       x: fromLeft ? -20 : W + 20, y: FLOOR, vx: 0, vy: 0,
       dir: fromLeft ? 1 : -1,
@@ -377,7 +386,34 @@
       passed: false, hitPlayer: false,
       // Black ones wait off-screen behind a warning arrow first (shorter as they get faster)
       warn: black ? Math.max(0.5, T.blackWarning / blackSpeed()) : 0,
-    });
+      dropping: false,
+    };
+    if (!black) leapFromCrowd(h);
+    humans.push(h);
+  }
+
+  // Yellow fans leap out of the front row of the crowd and drop onto an open spot on the mat
+  function leapFromCrowd(h) {
+    let tx = rand(HUM_MIN_X + 30, HUM_MAX_X - 30);
+    for (let k = 0; k < 8 && Math.abs(tx - rock.x) < 90; k++) tx = rand(HUM_MIN_X + 30, HUM_MAX_X - 30);
+    const sx = clamp(tx + rand(-70, 70), 80, W - 80), sy = 225;   // front row of the stands
+    const g = T.gravity * 0.8, vy0 = -rand(320, 420);
+    const t = (-vy0 + Math.sqrt(vy0 * vy0 + 2 * g * (FLOOR - sy))) / g;   // time to land on the mat
+    h.state = 'air';
+    h.x = sx; h.y = sy;
+    h.vx = (tx - sx) / t; h.vy = vy0;
+    h.rot = 0; h.rv = rand(-1.5, 1.5);       // a little flail, mostly upright
+    h.dir = Math.sign(tx - sx) || 1;
+    h.dropping = true;
+  }
+
+  // Slam shockwave: nearby fans jump in fright and land where they were
+  function hop(h, power) {
+    h.state = 'air';
+    h.vx = rand(-25, 25);
+    h.vy = -rand(260, 380) * (0.6 + 0.6 * power);
+    h.rot = 0; h.rv = 0;
+    h.ringOutDone = false;
   }
 
   // A black one marched past the rock without touching it
@@ -394,14 +430,6 @@
     cheer += 0.4;
   }
 
-  function fling(h, dx, force) {
-    const s = Math.sign(dx) || (Math.random() < 0.5 ? -1 : 1);
-    h.state = 'air';
-    h.vx = s * rand(220, 420) * force;
-    h.vy = -rand(450, 750) * force;
-    h.rv = rand(-14, 14);
-    h.ringOutDone = false;
-  }
 
   function squash(h, i, power = 0.5) {
     h.state = 'flat'; h.flatT = 0; h.rot = 0; h.pool = 0;
@@ -482,9 +510,13 @@
             h.think = rand(0.7, 2);
             h.dir = Math.random() < 0.4 ? (Math.sign(dx) || 1) : pick([-1, 1]);
           }
-          // Drift back toward the middle instead of hugging the ropes
-          if (h.x < HUM_MIN_X + 80) h.dir = 1;
-          else if (h.x > HUM_MAX_X - 80) h.dir = -1;
+          // Near the ropes: turn back toward the middle and commit to it for a bit,
+          // so they don't pace back and forth at the turn-around line
+          const edge = h.x < HUM_MIN_X + 80 ? 1 : h.x > HUM_MAX_X - 80 ? -1 : 0;
+          if (edge && h.dir !== edge) {
+            h.dir = edge;
+            h.think = rand(1, 2.2);
+          }
         }
         h.x += h.dir * speed * dt;
         if (h.x < HUM_MIN_X) { h.x = HUM_MIN_X; h.dir = 1; }
@@ -497,6 +529,16 @@
         if (h.x < -60 || h.x > W + 60) { ringOut(h); h.dead = true; break; }
         if (h.y >= FLOOR && h.vy > 0) {
           h.y = FLOOR; h.vx = h.vy = 0; h.rot = 0;
+          if (h.dropping) {
+            // Thud onto the mat from the stands
+            h.dropping = false;
+            for (let k = 0; k < 6; k++) {
+              particles.push({
+                kind: 'dust', x: h.x + rand(-10, 10), y: FLOOR, vx: rand(-90, 90), vy: -rand(20, 80),
+                life: rand(0.3, 0.5), max: 0.5, size: rand(3, 6), color: '200,190,170', grav: 200,
+              });
+            }
+          }
           if (h.type === 'black') {
             h.state = 'march';                // shake it off and keep marching the same way
           } else if (h.x < HUM_MIN_X || h.x > HUM_MAX_X) {
@@ -589,7 +631,7 @@
         squashed++;
         base += 100;
       } else if (d < radius * 1.8 && power > 0.4) {
-        fling(h, dx, 0.5 * power);
+        hop(h, power);
       }
     }
 

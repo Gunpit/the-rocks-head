@@ -32,15 +32,20 @@
     hypePerSquash: 7,
     hypeDecay: 2.5,          // hype lost per second
     hypeDuration: 8,         // seconds of HYPE MODE
-    // Score milestones make black ones faster and more common. The first comes at 2,000 points
-    // and each gap is 1.5x the last: 2,000 / 5,000 / 9,500 / 16,250 / 26,375 ...
-    blackFirstMilestone: 2000,
-    blackMilestoneGrowth: 1.5,
-    blackSpeedStep: 0.15,    // speed added per milestone
-    blackWarning: 1.1,       // seconds of edge warning before a black one enters (divided by its speed-up)
-    blackGapBase: 2.5,       // minimum seconds between black spawns...
-    blackGapStep: 0.5,       // ...plus this much per milestone (faster but fewer)
-    blackMaxLevel: 10,       // stops ramping here (2.5x speed)
+    // Difficulty never stops rising: every `milestoneEvery` points is a new level, with no top level.
+    // Each level makes black mans faster, more frequent and more numerous, and hype harder to keep.
+    milestoneEvery: 3000,
+    blackSpeedStep: 0.12,    // speed added per level (2x at level 8+, keeps going)
+    blackWarning: 1.1,       // seconds of edge warning before a black one enters (divided by its speed-up)...
+    blackWarningMin: 0.45,   // ...but never shorter than this, so it stays readable
+    blackGapBase: 2.5,       // minimum seconds between black spawns at level 0...
+    blackGapStep: 0.15,      // ...shrinking by this much per level...
+    blackGapMin: 0.9,        // ...down to this
+    blackMaxBase: 3,         // black mans allowed on screen at once at level 0 (after the opening minute)...
+    blackMaxPerLevels: 3,    // ...plus one more every this many levels
+    comboCap: 3,             // combo multiplier tops out here (x3; hype mode still doubles it)
+    hypeFatigue: 0.35,       // each HYPE MODE used makes the meter fill this much slower next time
+    hypeDrainPerLevel: 0.15, // the meter drains this much faster per level
     rockHeight: 110,
   };
 
@@ -268,6 +273,17 @@
     hurt: () => { tone(240, 55, 0.4, 'sawtooth', 0.22); noise(0.15, 0.2, 1500); },
     ringOut: () => tone(300, 900, 0.25, 'triangle', 0.15),
     dodge: () => { tone(900, 300, 0.18, 'triangle', 0.12); noise(0.15, 0.08, 3000); },
+    // Crowd clapping along in the dark (a big roar on the last one)
+    chant: (big) => {
+      for (let i = 0; i < 6; i++) setTimeout(() => noise(0.05, 0.12, 1600 + Math.random() * 800), i * 9);
+      noise(big ? 0.9 : 0.25, big ? 0.14 : 0.05, 900);
+    },
+    // Ring bell: ding ding ding
+    bell: () => {
+      for (let k = 0; k < 3; k++) {
+        [1, 2.76, 5.4].forEach((m, j) => tone(1046 * m, 1046 * m * 0.995, 1.1 - j * 0.3, 'sine', [0.16, 0.06, 0.03][j], k * 0.26));
+      }
+    },
     cheer: (v) => noise(0.6 + v * 0.6, 0.06 + 0.08 * v, 2600),
     shutter: () => { tone(2600, 1800, 0.02, 'square', 0.025); tone(1800, 1400, 0.03, 'square', 0.02, 0.05); },
   };
@@ -275,18 +291,18 @@
   // ---------------------------------------------------------------------------
   // Game state
   // ---------------------------------------------------------------------------
-  let state = 'title';        // 'title' | 'play' | 'over'
+  let state = 'title';        // 'title' | 'intro' | 'play' | 'over'
   let paused = false;
   let ignoreHold = false;     // swallow the press that started the game
   let time = 0, elapsed = 0, overTimer = 0;
   let score = 0, best = 0, lives = T.lives;
   let speedLevel = 0;         // score milestones reached
-  let hype = 0, hypeMode = 0;
+  let hype = 0, hypeMode = 0, hypeUses = 0;
   let spawnTimer = 0;
   let shake = 0, hitstop = 0, cheer = 0;
   let flash = { a: 0, color: '#fff' };
   const mat = { x: W / 2, dip: 0, vel: 0 };
-  let rock, humans, particles, texts;
+  let rock, humans, particles;
 
   try { best = parseInt(localStorage.getItem('rockshead-best'), 10) || 0; } catch (e) { /* storage blocked */ }
 
@@ -297,7 +313,7 @@
       sq: 0, sqVel: 0, invuln: 0, bounceSafe: 0,
     };
   }
-  rock = newRock(); humans = []; particles = []; texts = [];
+  rock = newRock(); humans = []; particles = [];
 
   // Debug-only peek at live state, for automated playtests (index.html?debug)
   if (DEBUG) {
@@ -305,21 +321,153 @@
       get state() { return state; }, get rock() { return rock; }, get humans() { return humans; },
       get score() { return score; }, get elapsed() { return elapsed; }, get lives() { return lives; },
       tick: (dt) => update(dt),            // step the simulation by hand (works even when the tab is hidden)
+      render: () => render(),
+      T,                                   // live tuning values, for A/B playtests
+      endRun: () => { if (state === 'play') gameOver(); },
     };
   }
 
-  function startGame() {
+  function startGame(withVoice = true) {
     state = 'play';
     setPaused(false);
     RocksMusic.stop();
     RocksMusic.start();
-    playVoice('start');
-    rock = newRock(); humans = []; particles = []; texts = []; splats = [];
-    score = 0; lives = T.lives; hype = 0; hypeMode = 0; speedLevel = 0;
+    if (withVoice) playVoice('start');
+    rock = newRock(); humans = []; particles = []; splats = [];
+    score = 0; lives = T.lives; hype = 0; hypeMode = 0; speedLevel = 0; hypeUses = 0;
     elapsed = 0; spawnTimer = 0.6; shake = 0; hitstop = 0; lastBlackAt = -99;
     ignoreHold = true;
-    addText(W / 2, 250, 'RING THE BELL!', '#ffd23f', 56, 1.4);
+    clearWords();
+    showBanner('RING THE BELL!', '#ffd23f', 56);
     sfx.cheer(1);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Entrance cutscene — plays before the first match of each visit; click / Space skips
+  // ---------------------------------------------------------------------------
+  // Timeline in seconds
+  const INTRO = { chant: 0.5, voice: 2.3, drop: 2.85, slam: 3.3, plate: 3.6, lightsUp: 3.9, bell: 4.8, end: 5.6 };
+  const INTRO_DARK = 0.85;
+  let introPlayed = false, introT = 0, introFired = {}, introVoiced = false, introDark = 0;
+  const spot = { x: W / 2, r: 80 };
+
+  function startIntro() {
+    state = 'intro';
+    introPlayed = true;
+    introT = 0; introFired = {}; introVoiced = false; introDark = 0;
+    rock = newRock();
+    rock.y = -200; rock.grounded = false;
+    humans = []; particles = []; splats = [];
+    clearWords();
+    ignoreHold = true;
+    spot.x = W / 2;
+  }
+
+  // Run fn once, the first frame the timeline passes `at`
+  function cue(name, at, fn) {
+    if (introT >= at && !introFired[name]) { introFired[name] = true; fn(); }
+  }
+
+  function updateIntro(dt) {
+    introT += dt;
+    if (pressLatch) {
+      pressLatch = false;
+      if (introT > 0.3) { finishIntro(); return; }   // skip
+    }
+
+    // Lights go down, then come back up after the slam
+    introDark = introT < INTRO.lightsUp
+      ? Math.min(INTRO_DARK, (introT / 0.6) * INTRO_DARK)
+      : Math.max(0, INTRO_DARK - ((introT - INTRO.lightsUp) / 0.6) * INTRO_DARK);
+
+    // Crowd chants and claps in the dark
+    for (let i = 0; i < 5; i++) cue('chant' + i, INTRO.chant + i * 0.36, () => { sfx.chant(i === 4); cheer += 0.4; });
+
+    // Spotlight sweeps the ring, then locks on centre for the drop
+    if (introT < INTRO.voice) { spot.x = W / 2 + Math.sin(introT * 2.6) * 280; spot.r = 75; }
+    else { spot.x += (W / 2 - spot.x) * Math.min(1, dt * 10); spot.r = 95; }
+
+    cue('voice', INTRO.voice, () => { playVoice('start'); introVoiced = true; cheer = 3; });
+
+    // The rock drops from the rafters...
+    if (introT >= INTRO.drop && !introFired.slam) {
+      const p = Math.min(1, (introT - INTRO.drop) / (INTRO.slam - INTRO.drop));
+      rock.y = lerp(-180, FLOOR, p * p);
+      rock.sq = 0.18 * p;                 // stretch as it falls
+      rock.sqVel = 0;
+    }
+    // ...and slams into the ring
+    cue('slam', INTRO.slam, () => {
+      rock.y = FLOOR; rock.grounded = true; rock.sqVel = -10;
+      slam(1, false);
+      shake = Math.max(shake, 22);
+      flash = { a: 0.35, color: '#ffffff' };
+      cheer += 2;
+      sfx.cheer(1.5);
+    });
+    if (introFired.slam) {
+      rock.sqVel += ((0 - rock.sq) * 320 - rock.sqVel * 14) * dt;
+      rock.sq = clamp(rock.sq + rock.sqVel * dt, -0.45, 0.4);
+    }
+
+    cue('bell', INTRO.bell, () => sfx.bell());
+    if (introT >= INTRO.end) { finishIntro(); return; }
+    updateEffects(dt);
+  }
+
+  function finishIntro() {
+    introDark = 0;
+    startGame(!introVoiced);            // don't repeat the announcer if the cutscene already played it
+  }
+
+  // Darkness with a spotlight hole that follows the rock, the light beam, and the name plate
+  function drawIntro() {
+    if (state !== 'intro') return;
+    const holeY = clamp(rock.y - 55, 40, FLOOR - 55);
+    if (introDark > 0.01) {
+      const g = ctx.createRadialGradient(spot.x, holeY, 0, spot.x, holeY, spot.r * 1.6);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(0.55, 'rgba(0,0,0,0)');
+      g.addColorStop(1, `rgba(0,0,0,${introDark})`);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+      // Beam from the rafters down to the spot
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const beam = ctx.createLinearGradient(0, 0, 0, FLOOR);
+      beam.addColorStop(0, `rgba(255,250,220,${0.22 * introDark / INTRO_DARK})`);
+      beam.addColorStop(1, `rgba(255,250,220,${0.06 * introDark / INTRO_DARK})`);
+      ctx.fillStyle = beam;
+      ctx.beginPath();
+      ctx.moveTo(spot.x - 18, -10); ctx.lineTo(spot.x + 18, -10);
+      ctx.lineTo(spot.x + spot.r, FLOOR + 10); ctx.lineTo(spot.x - spot.r, FLOOR + 10);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Wrestling-promo name plate sliding in from the left
+    if (introT >= INTRO.plate) {
+      const t = introT - INTRO.plate;
+      const slide = Math.min(1, t / 0.25);
+      const x = lerp(-460, 30, 1 - Math.pow(1 - slide, 3));
+      const fade = Math.min(1, (INTRO.end - introT) / 0.3);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, fade);
+      ctx.fillStyle = '#b3121b';
+      ctx.fillRect(x, 412, 430, 52);
+      ctx.fillStyle = '#ffd23f';
+      ctx.fillRect(x, 464, 430, 6);
+      ctx.fillStyle = '#111';
+      ctx.fillRect(x + 430, 412, 12, 58);
+      outlinedText("THE ROCK'S HEAD", x + 16, 437, 40, '#ffd23f', 'left', 6);
+      outlinedText('UNDISPUTED BOULDER CHAMPION', x + 16, 486, 18, '#ffffff', 'left', 4);
+      ctx.restore();
+    }
+
+    if (introT > 0.3 && Math.floor(time * 2) % 2 === 0) {
+      outlinedText('CLICK / SPACE TO SKIP', W - 16, H - 16, 16, 'rgba(255,255,255,0.75)', 'right', 3);
+    }
   }
 
   function gameOver() {
@@ -335,34 +483,26 @@
 
   // Difficulty ramps with time survived
   const spawnInterval = () => Math.max(0.5, 1.7 - elapsed * 0.012) * rand(0.7, 1.3);
-  const blackChance = () => Math.min(0.4, 0.12 + elapsed * 0.004);
-  // As they get faster they come less often: minimum seconds between black spawns
-  const blackGap = () => T.blackGapBase + speedLevel * T.blackGapStep;
+  const blackChance = () => Math.min(0.9, Math.min(0.4, 0.12 + elapsed * 0.004) + speedLevel * 0.03);
+  // Minimum seconds between black spawns: shrinks every level
+  const blackGap = () => Math.max(T.blackGapMin, T.blackGapBase - speedLevel * T.blackGapStep);
   let lastBlackAt = -99;
   const blackSpeed = () => 1 + speedLevel * T.blackSpeedStep;
 
-  // How many milestones a score has passed
-  function milestoneLevel(s) {
-    let lvl = 0, gap = T.blackFirstMilestone, need = gap;
-    while (s >= need && lvl < T.blackMaxLevel) {
-      lvl++;
-      gap *= T.blackMilestoneGrowth;
-      need += gap;
-    }
-    return lvl;
-  }
+  // Level = score milestones passed. Steady spacing and no top level, so it never stops getting harder.
+  const milestoneLevel = (s) => Math.floor(s / T.milestoneEvery);
 
-  // Score milestones crank up the black ones
   function checkMilestones() {
     const lvl = milestoneLevel(score);
     if (lvl <= speedLevel) return;
     const ratio = (1 + lvl * T.blackSpeedStep) / blackSpeed();
     speedLevel = lvl;
     for (const h of humans) if (h.type === 'black') h.speed *= ratio;   // the ones already in, too
-    addText(W / 2, 200, lvl >= T.blackMaxLevel ? 'MAXIMUM CARNAGE!' : "THEY'RE GETTING FASTER!", '#ff3b3b', 40, 1.4);
+    showBanner("THEY'RE GETTING FASTER!", '#ff3b3b', 44, 'LEVEL ' + lvl);
   }
   const maxHumans = () => Math.min(16, 6 + elapsed / 10);
-  const maxBlacks = () => Math.min(3, 1 + Math.floor(elapsed / 20));   // on screen at once
+  // On screen at once: grows over the opening minute, then one more every few levels
+  const maxBlacks = () => Math.min(T.blackMaxBase, 1 + Math.floor(elapsed / 20)) + Math.floor(speedLevel / T.blackMaxPerLevels);
 
   // ---------------------------------------------------------------------------
   // Humans
@@ -373,6 +513,8 @@
     const black = forceBlack ||
       (blacksIn < maxBlacks() && elapsed - lastBlackAt >= blackGap() && Math.random() < blackChance());
     if (black) lastBlackAt = elapsed;
+    // Only yellow fans count toward the crowd limit, so a full mat never blocks the danger
+    else if (humans.filter((x) => x.type === 'yellow' && x.state !== 'flat').length >= maxHumans()) return;
     const h = {
       type: black ? 'black' : 'yellow',
       x: fromLeft ? -20 : W + 20, y: FLOOR, vx: 0, vy: 0,
@@ -385,7 +527,7 @@
       coward: !black && Math.random() < 1 / 7, scared: false,   // a few yellow fans still run
       passed: false, hitPlayer: false,
       // Black ones wait off-screen behind a warning arrow first (shorter as they get faster)
-      warn: black ? Math.max(0.5, T.blackWarning / blackSpeed()) : 0,
+      warn: black ? Math.max(T.blackWarningMin, T.blackWarning / blackSpeed()) : 0,
       dropping: false,
     };
     if (!black) leapFromCrowd(h);
@@ -430,13 +572,11 @@
   // A black one marched past the rock without touching it
   function dodged(h) {
     h.passed = true;
-    const pts = 150 * (hypeMode > 0 ? 2 : 1);
-    score += pts;
+    addPoints(150 * (hypeMode > 0 ? 2 : 1));
     if (hypeMode <= 0) {
-      hype = Math.min(100, hype + 8);
-      if (hype >= 100) startHypeMode();
+      addHype(8);
     }
-    addText(rock.x, rock.y - T.rockHeight - 40, 'DODGED! +' + pts, '#ff9f1c', 32);
+    showCallout('DODGED!', '#ff9f1c', 34);
     sfx.dodge();
     cheer += 0.4;
   }
@@ -477,10 +617,8 @@
   function ringOut(h) {
     if (h.ringOutDone || h.type === 'black') return;
     h.ringOutDone = true;
-    const pts = 50 * (hypeMode > 0 ? 2 : 1);
-    score += pts;
-    hype = Math.min(100, hype + 3);
-    addText(clamp(h.x, 80, W - 80), FLOOR - 120, 'RING OUT! +' + pts, '#7fdbff', 30);
+    addPoints(50 * (hypeMode > 0 ? 2 : 1), 'RING OUT');
+    addHype(3);
     sfx.ringOut();
     cheer += 0.3;
   }
@@ -613,7 +751,6 @@
         rock.vx = bounceDir * 300;
         rock.bounceSafe = 0.35;
         rock.sqVel -= 6;
-        addText(rock.x, FLOOR - 150, 'BOING!', '#ffffff', 30, 0.7);
         sfx.jump(0.6);
         return;
       }
@@ -655,21 +792,19 @@
 
     // Score and hype
     if (squashed > 0) {
-      const mult = squashed * (hypeMode > 0 ? 2 : 1);
-      const pts = base * mult;
-      score += pts;
+      const mult = Math.min(squashed, T.comboCap) * (hypeMode > 0 ? 2 : 1);
+      addPoints(base * mult, mult > 1 ? 'x' + mult : '');
+      // One callout for the whole slam, e.g. "MEGA TRIPLE SQUASH!"
       const word = squashed === 1 ? 'SQUASH!' : squashed === 2 ? 'DOUBLE SQUASH!' :
         squashed === 3 ? 'TRIPLE SQUASH!' : squashed + 'x COMBO!!';
-      addText(rock.x, FLOOR - 150, word, '#2ecc40', 34 + Math.min(squashed, 5) * 5);
-      addText(rock.x, FLOOR - 112, '+' + pts + (mult > 1 ? '  (x' + mult + ')' : ''), '#ffffff', 26);
+      showCallout((mega ? 'MEGA ' : '') + word, mega ? '#ff3b3b' : '#2ecc40', 34 + Math.min(squashed, 4) * 4);
       if (hypeMode <= 0) {
-        hype += squashed * T.hypePerSquash + (squashed - 1) * 5 + (mega ? 6 : 0);
-        if (hype >= 100) startHypeMode();
+        addHype(squashed * T.hypePerSquash + (squashed - 1) * 5 + (mega ? 6 : 0));
       }
       cheer += 0.3 * squashed;
       if (squashed >= 3) sfx.cheer(1);
     }
-    if (mega) addText(rock.x, FLOOR - 195, 'MEGA SLAM!', '#ff3b3b', 52);
+    else if (mega) showCallout('MEGA SLAM!', '#ff3b3b', 44);
 
     // Juice
     const n = 10 + 30 * power;
@@ -700,10 +835,17 @@
     return bounceDir;
   }
 
+  // Fill the hype meter. Each HYPE MODE already used this run makes it fill slower (no limit).
+  function addHype(amount) {
+    if (hypeMode > 0) return;
+    hype = Math.min(100, hype + amount / (1 + hypeUses * T.hypeFatigue));
+    if (hype >= 100) startHypeMode();
+  }
+
   function startHypeMode() {
+    hypeUses++;
     hype = 100; hypeMode = T.hypeDuration;
-    addText(W / 2, 200, 'HYPE MODE!', '#ffd23f', 70, 1.6);
-    addText(W / 2, 245, 'EVERY SLAM IS A MEGA SLAM  •  DOUBLE POINTS', '#ffffff', 22, 1.6);
+    showBanner('HYPE MODE!', '#ffd23f', 70, 'EVERY SLAM IS A MEGA SLAM  •  DOUBLE POINTS');
     flash = { a: 0.35, color: '#ffd23f' };
     sfx.cheer(1.5);
     RocksMusic.setHype(true);   // the theme handles the big entrance (glass shatter + full band)
@@ -721,7 +863,7 @@
     rock.vx = -h.dir * 300; rock.vy = -650; rock.grounded = false;
     rock.charging = false; rock.charge = 0; rock.slamPending = false;
     if (hypeMode <= 0) hype = Math.max(0, hype - 25);
-    addText(rock.x, FLOOR - 150, lives > 0 ? 'OUCH!' : 'K.O.!', '#ff4040', 46);
+    showCallout(lives > 0 ? 'OUCH!' : 'K.O.!', '#ff4040', 46);
     if (lives <= 0) gameOver();
   }
 
@@ -761,8 +903,34 @@
   // ---------------------------------------------------------------------------
   // Effects
   // ---------------------------------------------------------------------------
-  function addText(x, y, text, color, size, life = 1.1) {
-    texts.push({ x, y, text, color, size, life, max: life });
+  // On-screen words go through three channels so they never pile up:
+  //   callout   — one short word over the action; a new one replaces the old
+  //   banner    — big announcements in a fixed spot, one at a time (the rest wait in line)
+  //   score pop — "+N" beside the score box; keeps adding up while it's showing
+  let callout = null, banner = null, bannerQueue = [], scorePop = null;
+
+  function showCallout(text, color, size = 38, x = rock.x) {
+    callout = { text, color, size, x: clamp(x, 150, W - 150), y: FLOOR - 165, life: 0.9, max: 0.9 };
+  }
+
+  function showBanner(text, color, size = 56, sub = '') {
+    const b = { text, color, size, sub, life: 1.5, max: 1.5 };
+    if (banner) bannerQueue.push(b); else banner = b;
+  }
+
+  function addPoints(pts, note = '') {
+    score += pts;
+    if (scorePop && scorePop.life > 0.25) {
+      scorePop.pts += pts;
+      scorePop.note = note;
+      scorePop.life = scorePop.max;
+    } else {
+      scorePop = { pts, note, life: 1.3, max: 1.3 };
+    }
+  }
+
+  function clearWords() {
+    callout = null; banner = null; bannerQueue = []; scorePop = null;
   }
 
   function updateEffects(dt) {
@@ -782,8 +950,10 @@
     particles = particles.filter((p) => p.life > 0);
     for (const s of splats) s.life -= dt;
     splats = splats.filter((s) => s.life > 0);
-    for (const t of texts) { t.life -= dt; t.y -= 30 * dt; }
-    texts = texts.filter((t) => t.life > 0);
+    if (callout && (callout.life -= dt) <= 0) callout = null;
+    if (callout) callout.y -= 18 * dt;
+    if (banner && (banner.life -= dt) <= 0) banner = bannerQueue.shift() || null;
+    if (scorePop && (scorePop.life -= dt) <= 0) scorePop = null;
 
     shake *= Math.pow(0.002, dt);
     if (shake < 0.2) shake = 0;
@@ -805,9 +975,11 @@
 
     if (state !== 'play') {
       if (state === 'over') overTimer += dt;
+      if (state === 'intro') { updateIntro(dt); return; }
       if (pressLatch) {
         pressLatch = false;
-        if (state === 'title' || overTimer > 0.8) { audio(); startGame(); }
+        if (state === 'title') { audio(); if (introPlayed) startGame(); else startIntro(); }
+        else if (overTimer > 0.8) { audio(); startGame(); }
       }
       for (const h of humans) if (h.state === 'air' || h.state === 'flat') updateHuman(h, dt);
       humans = humans.filter((h) => !h.dead);
@@ -829,8 +1001,7 @@
     spawnTimer -= dt;
     if (spawnTimer <= 0) {
       spawnTimer = spawnInterval();
-      const active = humans.filter((h) => h.state !== 'flat').length;
-      if (active < maxHumans()) spawnHuman();
+      spawnHuman();
     }
 
     if (hypeMode > 0) {
@@ -844,7 +1015,7 @@
       }
       if (hypeMode <= 0) { hypeMode = 0; hype = 0; RocksMusic.setHype(false); playVoice('hypeEnd'); }
     } else {
-      hype = Math.max(0, hype - T.hypeDecay * dt);
+      hype = Math.max(0, hype - T.hypeDecay * (1 + speedLevel * T.hypeDrainPerLevel) * dt);
     }
 
     updateEffects(dt);
@@ -1381,13 +1552,17 @@
   }
 
   function drawTexts() {
-    for (const t of texts) {
-      const age = t.max - t.life;
-      const pop = 1 + Math.max(0, 0.25 - age) * 2;
-      ctx.globalAlpha = Math.min(1, t.life * 3);
-      outlinedText(t.text, clamp(t.x, 120, W - 120), t.y, t.size * pop, t.color);
+    // Pops in big, settles, then fades
+    const draw = (w, x, y) => {
+      const age = w.max - w.life;
+      const pop = 1 + Math.max(0, 0.2 - age) * 2;
+      ctx.globalAlpha = Math.min(1, w.life * 4);
+      outlinedText(w.text, x, y, w.size * pop, w.color);
+      if (w.sub) outlinedText(w.sub, x, y + w.size * 0.65, 22, '#ffffff', 'center', 5);
       ctx.globalAlpha = 1;
-    }
+    };
+    if (callout) draw(callout, callout.x, callout.y);
+    if (banner) draw(banner, W / 2, 170);
   }
 
   function drawHUD() {
@@ -1400,6 +1575,14 @@
     outlinedText('SCORE', 28, 26, 18, '#ffd23f', 'left', 4);
     outlinedText(score.toLocaleString(), 28, 52, 32, '#ffd23f', 'left', 5);
     outlinedText('BEST ' + best.toLocaleString(), 22, 86, 16, '#cfd8ff', 'left', 4);
+    if (scorePop) {
+      const age = scorePop.max - scorePop.life;
+      ctx.globalAlpha = Math.min(1, scorePop.life * 4);
+      const size = 28 * (1 + Math.max(0, 0.15 - age) * 2);
+      outlinedText('+' + scorePop.pts.toLocaleString() + (scorePop.note ? '  ' + scorePop.note : ''),
+        236, 44, size, '#ffd23f', 'left', 5);
+      ctx.globalAlpha = 1;
+    }
 
     // Lives
     if (rockImg.complete && rockImg.naturalWidth) {
@@ -1439,7 +1622,7 @@
   }
 
   function drawOverlay() {
-    if (state === 'play' && !paused) return;
+    if ((state === 'play' && !paused) || state === 'intro') return;
     ctx.fillStyle = 'rgba(5,5,15,0.62)';
     ctx.fillRect(0, 0, W, H);
 
@@ -1482,7 +1665,7 @@
     drawDropShadows();
     for (const h of humans) if (h.state === 'flat') drawHuman(h);
     for (const h of humans) if (h.state !== 'flat' && h.state !== 'air' && h.state !== 'climb') drawHuman(h);
-    if (state === 'play' || state === 'over') drawRock();
+    if (state === 'play' || state === 'over' || state === 'intro') drawRock();
     for (const h of humans) if (h.state === 'air') drawHuman(h);
     drawRingFront();
     drawParticles();
@@ -1496,7 +1679,8 @@
       ctx.fillRect(0, 0, W, H);
       ctx.globalAlpha = 1;
     }
-    if (state !== 'title') drawHUD();
+    drawIntro();
+    if (state !== 'title' && state !== 'intro') drawHUD();
     drawOverlay();
   }
 
